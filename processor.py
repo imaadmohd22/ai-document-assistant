@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -7,7 +6,7 @@ from io import BytesIO
 
 import faiss
 import numpy as np
-import ollama
+import llm_provider as ollama
 import pytesseract
 
 from pdf2image import convert_from_bytes
@@ -27,7 +26,17 @@ DATA_FILE = os.path.join(STORAGE_DIR, "document_data.json")
 EMBEDDINGS_FILE = os.path.join(STORAGE_DIR, "embeddings.npy")
 
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-LLM_MODEL_NAME = "llama3.2:3b"
+LLM_MODEL_NAME = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+
+PUBLIC_DEMO = os.getenv(
+    "PUBLIC_DEMO", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def public_demo_enabled():
+    """Disable persistent document storage on shared public deployments."""
+    return PUBLIC_DEMO
+
 
 # OCR settings
 OCR_ENABLED = os.getenv("OCR_ENABLED", "true").lower() in {
@@ -96,7 +105,7 @@ def extract_pdf_pages(pdf_file):
     Extract normal PDF text first. If a page has no extractable text,
     attempt OCR on that page.
 
-    Return format stays compatible with the existing application:
+    Return format:
     [{"filename": str, "page": int, "text": str}, ...]
     """
     pdf_bytes = pdf_file.getvalue()
@@ -135,6 +144,7 @@ def extract_pdf_pages(pdf_file):
         # Use OCR only when ordinary extraction finds no text.
         if not text and OCR_ENABLED:
             ocr_attempted += 1
+
             try:
                 text = _ocr_pdf_page(pdf_bytes, page_number)
             except Exception as error:
@@ -232,6 +242,7 @@ def create_embeddings(chunks):
         return np.empty((0, 384), dtype=np.float32)
 
     model = get_embedding_model()
+
     embeddings = model.encode(
         [chunk["text"] for chunk in chunks],
         convert_to_numpy=True,
@@ -247,8 +258,10 @@ def create_faiss_index(embeddings):
         return None
 
     embeddings = np.asarray(embeddings, dtype=np.float32)
+
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
+
     return index
 
 
@@ -258,8 +271,10 @@ def rebuild_index_from_existing_embeddings(embeddings):
         return None
 
     embeddings = np.asarray(embeddings, dtype=np.float32)
+
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
+
     return index
 
 
@@ -268,6 +283,9 @@ def rebuild_index_from_existing_embeddings(embeddings):
 # ============================================================
 
 def ensure_storage_directory():
+    if public_demo_enabled():
+        return
+
     os.makedirs(STORAGE_DIR, exist_ok=True)
 
 
@@ -283,6 +301,7 @@ def _atomic_save_json(path, data):
             json.dump(data, file, ensure_ascii=False)
 
         os.replace(temp_path, path)
+
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -298,6 +317,10 @@ def save_document_index(
     chunk_size,
     overlap,
 ):
+    # Never persist visitors' uploaded documents on a shared public app.
+    if public_demo_enabled():
+        return
+
     if not chunks or index is None:
         raise ValueError("Cannot save an empty collection.")
 
@@ -331,6 +354,7 @@ def save_document_index(
             prefix="tmp_", suffix=".index", dir=STORAGE_DIR
         )
         os.close(fd)
+
         faiss.write_index(index, temp_index)
         temporary_files[INDEX_FILE] = temp_index
 
@@ -338,14 +362,17 @@ def save_document_index(
             prefix="tmp_", suffix=".npy", dir=STORAGE_DIR
         )
         os.close(fd)
+
         np.save(temp_embeddings, embeddings)
         temporary_files[EMBEDDINGS_FILE] = temp_embeddings
 
         fd, temp_data = tempfile.mkstemp(
             prefix="tmp_", suffix=".json", dir=STORAGE_DIR
         )
+
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             json.dump(metadata, file, ensure_ascii=False)
+
         temporary_files[DATA_FILE] = temp_data
 
         for destination, temporary in temporary_files.items():
@@ -358,6 +385,10 @@ def save_document_index(
 
 
 def load_document_index():
+    # Public visitors should always start with a fresh in-memory collection.
+    if public_demo_enabled():
+        return None
+
     required_files = [INDEX_FILE, DATA_FILE, EMBEDDINGS_FILE]
 
     if not all(os.path.exists(path) for path in required_files):
@@ -410,6 +441,9 @@ def load_document_index():
 
 
 def persistent_index_exists():
+    if public_demo_enabled():
+        return False
+
     return all(
         os.path.exists(path)
         for path in [INDEX_FILE, DATA_FILE, EMBEDDINGS_FILE]
@@ -417,6 +451,9 @@ def persistent_index_exists():
 
 
 def delete_document_index():
+    if public_demo_enabled():
+        return
+
     for path in [INDEX_FILE, DATA_FILE, EMBEDDINGS_FILE]:
         if os.path.exists(path):
             os.remove(path)
@@ -467,6 +504,7 @@ def is_chapter_heading(line):
         return False
 
     value = match.group(1).strip().lower()
+
     return (
         value.isdigit()
         or value in ROMAN_NUMBERS
@@ -569,6 +607,7 @@ def add_document_to_collection(
     new_chunks = chunk_text(
         new_pages, chunk_size=chunk_size, overlap=overlap
     )
+
     new_embeddings = create_embeddings(new_chunks)
 
     pages.extend(new_pages)
@@ -768,6 +807,7 @@ def retrieve_relevant_chunks(
         return []
 
     model = get_embedding_model()
+
     query_vector = model.encode(
         [query],
         convert_to_numpy=True,
@@ -784,6 +824,7 @@ def retrieve_relevant_chunks(
 
     for local_i, global_i in enumerate(allowed_indices):
         chunk = chunks[global_i]
+
         semantic = float(semantic_scores[local_i])
         lexical = lexical_score(query, chunk["text"])
         intent = intent_score(query, chunk)
@@ -1043,6 +1084,7 @@ def build_summary_sections(pages, max_chars=12000):
                 "label": current_label,
                 "text": current_text,
             })
+
             current_text = ""
             current_label = None
 

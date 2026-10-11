@@ -3,6 +3,7 @@ pypdf
 sentence-transformers
 faiss-cpu
 numpy
-torch
-torchvision
-ollama
+groq
+reportlab
+pytesseract
+pdf2image
