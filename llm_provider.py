@@ -12,7 +12,8 @@ MODEL_NAME = os.getenv(
 
 
 def _get_api_key():
-    """Read the Groq API key from environment variables or Streamlit Secrets."""
+    """Read the API key from environment variables or Streamlit Secrets."""
+
     key = os.getenv("GROQ_API_KEY", "").strip()
 
     if key:
@@ -22,19 +23,21 @@ def _get_api_key():
         import streamlit as st
 
         key = str(st.secrets.get("GROQ_API_KEY", "")).strip()
+
         if key:
             return key
+
     except Exception:
         pass
 
     raise RuntimeError(
-        "GROQ_API_KEY is missing. Add it to your local environment "
-        "or configure it in Streamlit Community Cloud Secrets."
+        "GROQ_API_KEY is missing. Configure it in "
+        "Streamlit Community Cloud Secrets or your local environment."
     )
 
 
 def _get_client():
-    """Create a Groq API client."""
+    """Create the Groq API client."""
     return Groq(api_key=_get_api_key())
 
 
@@ -45,12 +48,8 @@ def chat(
     options=None,
     **kwargs,
 ):
-    """
-    Compatibility wrapper for existing ollama.chat() calls.
+    """Provide an Ollama-compatible response using Groq."""
 
-    Returns:
-        {"message": {"content": "..."}}
-    """
     if not messages:
         raise ValueError("At least one chat message is required.")
 
@@ -72,13 +71,12 @@ def chat(
     if format:
         schema_json = json.dumps(format, ensure_ascii=False)
 
-        schema_instruction = (
-            "\n\nReturn ONLY a valid JSON object matching this JSON "
-            "schema. Do not include Markdown fences or commentary.\n"
+        instruction = (
+            "\n\nReturn only a valid JSON object matching the "
+            "requested schema. Do not use Markdown fences.\n"
             f"JSON schema:\n{schema_json}"
         )
 
-        # Add the schema instructions to the last user message.
         user_indices = [
             i
             for i, message in enumerate(groq_messages)
@@ -86,18 +84,13 @@ def chat(
         ]
 
         if user_indices:
-            last_user_index = user_indices[-1]
-            groq_messages[last_user_index]["content"] += (
-                schema_instruction
-            )
+            groq_messages[user_indices[-1]]["content"] += instruction
         else:
             groq_messages.append({
                 "role": "user",
-                "content": schema_instruction,
+                "content": instruction,
             })
 
-        # JSON mode requests valid JSON syntax. The application must
-        # still validate fields and citations after receiving the result.
         response_format = {"type": "json_object"}
 
     options = options or {}
@@ -111,8 +104,12 @@ def chat(
     if response_format:
         request["response_format"] = response_format
 
-    # Forward supported optional parameters when explicitly supplied.
-    for parameter in ("max_tokens", "max_completion_tokens", "top_p", "seed"):
+    for parameter in (
+        "max_tokens",
+        "max_completion_tokens",
+        "top_p",
+        "seed",
+    ):
         value = kwargs.get(parameter)
 
         if value is not None:
@@ -120,7 +117,6 @@ def chat(
 
     try:
         response = _get_client().chat.completions.create(**request)
-
         content = response.choices[0].message.content or ""
 
         return {
